@@ -27,7 +27,7 @@ import urllib.parse
 from html import unescape
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 AUTHOR = "404 Author Not Found"
 USER_AGENT = "obsidipedia/1.0 (+https://github.com/IvanTurko/obsidipedia)"
@@ -91,6 +91,13 @@ def orig_filename(src: str) -> str:
     return urllib.parse.unquote(name).replace(" ", "_")
 
 
+def attr(tag: Tag, name: str, default: str = "") -> str:
+    # bs4 types Tag.get() as str | list[str] | None (attrs like "class" can be
+    # multi-valued); the ones we read here (src, href, width, alt) never are
+    val = tag.get(name, default)
+    return val if isinstance(val, str) else default
+
+
 def clean_html(
     html: str, attachments_dir: str, rel_attachments: str
 ) -> tuple[str, list[str]]:
@@ -130,7 +137,11 @@ def clean_html(
     # emits a fenced code block with the language tag instead of a bare indented one
     for div in soup.select("div.mw-highlight"):
         lang = next(
-            (m.group(1) for c in div.get("class", []) if (m := LANG_CLASS.match(c))),
+            (
+                m.group(1)
+                for c in div.get_attribute_list("class")
+                if (m := LANG_CLASS.match(c))
+            ),
             None,
         )
         pre = div.find("pre")
@@ -170,7 +181,7 @@ def clean_html(
         table.insert(0, new_thead)
 
     for a in soup.find_all("a"):
-        href = a.get("href", "")
+        href = attr(a, "href")
         if href.startswith("http"):
             a.attrs = {"href": href}  # keep external links
         else:
@@ -185,9 +196,9 @@ def clean_html(
     os.makedirs(attachments_dir, exist_ok=True)
     saved = []
     for img in soup.find_all("img"):
-        src = img.get("src", "")
+        src = attr(img, "src")
         try:
-            w = int(img.get("width", "999"))
+            w = int(attr(img, "width", "999"))
         except ValueError:
             w = 999
         name = orig_filename(src) if src else ""
@@ -224,7 +235,7 @@ def clean_html(
             # depth than --out, since this path is baked in relative to it at import time
             img.replace_with(f"\x00IMG:{rel_attachments}/{name}\x00")
         else:
-            img.attrs = {"src": name, "alt": img.get("alt", "")}
+            img.attrs = {"src": name, "alt": attr(img, "alt")}
 
     return str(soup), saved
 
