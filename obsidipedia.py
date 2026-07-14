@@ -98,11 +98,7 @@ def attr(tag: Tag, name: str, default: str = "") -> str:
     return val if isinstance(val, str) else default
 
 
-def clean_html(
-    html: str, attachments_dir: str, rel_attachments: str
-) -> tuple[str, list[str]]:
-    soup = BeautifulSoup(html, "html.parser")
-
+def _strip_junk(soup: BeautifulSoup) -> None:
     for sel in [
         ".mw-editsection",
         ".navbox",
@@ -132,6 +128,8 @@ def clean_html(
     for el in soup.find_all(style=re.compile(r"display:\s*none")):
         el.decompose()
 
+
+def _tag_code_language(soup: BeautifulSoup) -> None:
     # SyntaxHighlight extension marks the language on the wrapping div (e.g.
     # "mw-highlight-lang-asm"); move it onto a <code class="language-asm"> so pandoc
     # emits a fenced code block with the language tag instead of a bare indented one
@@ -152,9 +150,11 @@ def clean_html(
                 code.append(child.extract())
             pre.append(code)
 
-    # GFM has no table-caption syntax: pandoc just drops the text somewhere near the
-    # table (often after it) instead of before, so pull it out as its own paragraph
+
+def _fix_tables(soup: BeautifulSoup) -> None:
     for table in soup.find_all("table"):
+        # GFM has no table-caption syntax: pandoc just drops the text somewhere near
+        # the table (often after it) instead of before, so pull it out as its own paragraph
         caption = table.find("caption")
         if caption:
             p = soup.new_tag("p")
@@ -164,8 +164,8 @@ def clean_html(
             table.insert_before(p)
             caption.decompose()
 
-    # GFM requires a header row: give header-less tables a real <thead> from their first row
-    for table in soup.find_all("table"):
+        # GFM requires a header row: give header-less tables a real <thead> from
+        # their first row
         thead = table.find("thead")
         if thead and thead.find(["th", "td"]):
             continue  # already has a real header row
@@ -180,6 +180,8 @@ def clean_html(
         new_thead.append(first_tr.extract())
         table.insert(0, new_thead)
 
+
+def _fix_links(soup: BeautifulSoup) -> None:
     for a in soup.find_all("a"):
         href = attr(a, "href")
         if href.startswith("http"):
@@ -187,12 +189,38 @@ def clean_html(
         else:
             a.unwrap()  # internal /wiki/ links -> plain text
 
+
+def _fix_multi_image_galleries(soup: BeautifulSoup) -> None:
+    # {{Multiple image}} template: several image+caption pairs (.tsingle) crammed into
+    # plain .thumb.tmulti/.trow divs, unlike single images which already get real
+    # <figure>/<figcaption>. Left alone, the div-unwrap below mashes every image and
+    # caption into one run-on paragraph -> turn each .tsingle into a real figure first
+    for gallery in soup.select(".thumb.tmulti"):
+        for single in gallery.select(".tsingle"):
+            fig = soup.new_tag("figure")
+            img = single.find("img")
+            caption = single.find(class_="thumbcaption")
+            if img:
+                fig.append(img.extract())
+            if caption:
+                caption.name = "figcaption"
+                fig.append(caption.extract())
+            single.replace_with(fig)
+        for leftover_caption in gallery.select("div.thumbcaption"):
+            leftover_caption.name = "p"  # shared caption with no image of its own
+
+
+def _unwrap_decorative(soup: BeautifulSoup) -> None:
     # decorative wrappers (IPA pronunciation spans, nowrap, id-lock, abbr tooltips,
     # gallery .thumb/.gallerytext divs...) -> keep the text, drop the tag; an unclosed
     # <div style="width:...px"> left dangling inside a list item breaks everything after it
     for wrapper in soup.find_all(["span", "div"]):
         wrapper.unwrap()
 
+
+def _download_images(
+    soup: BeautifulSoup, attachments_dir: str, rel_attachments: str
+) -> list[str]:
     os.makedirs(attachments_dir, exist_ok=True)
     saved = []
     for img in soup.find_all("img"):
@@ -236,7 +264,20 @@ def clean_html(
             img.replace_with(f"\x00IMG:{rel_attachments}/{name}\x00")
         else:
             img.attrs = {"src": name, "alt": attr(img, "alt")}
+    return saved
 
+
+def clean_html(
+    html: str, attachments_dir: str, rel_attachments: str
+) -> tuple[str, list[str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    _strip_junk(soup)
+    _tag_code_language(soup)
+    _fix_tables(soup)
+    _fix_links(soup)
+    _fix_multi_image_galleries(soup)
+    _unwrap_decorative(soup)
+    saved = _download_images(soup, attachments_dir, rel_attachments)
     return str(soup), saved
 
 
